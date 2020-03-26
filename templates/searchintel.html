@@ -20,11 +20,10 @@
 </a>
 
 {% else %}
-Hello <strong>{{ current_user.character_name }}</strong><br>
-To use the intel search, navigate <a href="/searchintel">here</a>.
+<b>Search</b>
 <br>
-<i><b>Note:</b> the API results are cached each clock hour to not make our upstream providers mad because of too many requests.</i>
-<br>
-<br>
-<a href="{{ url_for('logout') }}">Logout</a>
+<form action="/lookupresults" method="GET">
+<input type="text" name="string" placeholder="char name" />
+<input type="submit" name="submit" value="search" />
+</form>
 {% endif %}

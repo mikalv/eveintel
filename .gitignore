@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Eve cache dir
+cache/*
+
 # C extensions
 *.so
 

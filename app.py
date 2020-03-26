@@ -24,6 +24,7 @@ from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm.exc import NoResultFound
 
+import requests
 import config
 import hashlib
 import hmac
@@ -151,7 +152,7 @@ def login():
     session['token'] = token
     return redirect(esisecurity.get_auth_uri(
         state=token,
-        scopes=['esi-wallet.read_character_wallet.v1']
+        scopes=['esi-killmails.read_killmails.v1']
     ))
 
 
@@ -232,14 +233,198 @@ def index():
         # if the access token need some update
         esisecurity.update_token(current_user.get_sso_data())
 
-        op = esiapp.op['get_characters_character_id_wallet'](
-            character_id=current_user.character_id
-        )
-        wallet = esiclient.request(op)
+        #op = esiapp.op['get_characters_character_id_wallet'](
+        #    character_id=current_user.character_id
+        #)
+        #wallet = esiclient.request(op)
 
     return render_template('base.html', **{
         'wallet': wallet,
     })
+
+
+from pprint import pprint
+    
+
+def searchapi(text,strict=False,categories='character'):
+    op = esiapp.op['get_search'](
+        search=text,
+        strict=strict,
+        categories=categories,
+        datasource='tranquility',
+        language='en-us'
+    )
+    results = esiclient.request(op)
+    return results
+
+def getpubkms(char_id):
+    cache_id = getcacheprefix(char_id) + "_zkillboard"
+    if checkcache(cache_id):
+        return readcache(cache_id)
+    else:
+        r1 = requests.get("https://zkillboard.com/api/kills/characterID/%d/" % (char_id,))
+        r2 = requests.get("https://zkillboard.com/api/losses/characterID/%d/" % (char_id,))
+        joined_lists = r1.json() + r2.json()
+        writecache(cache_id, joined_lists)
+        return joined_lists
+
+import pickle
+from os import path
+
+CACHE_DIR = path.join(path.dirname(path.realpath(__file__)), 'cache')
+
+def getcacheprefix(char_id):
+    now = datetime.now()
+    return now.strftime("%Y-%m-%d_%H_") + str(char_id)
+
+def readcache(cache_id):
+    f = open(path.join(CACHE_DIR, cache_id), "r")
+    data = pickle.load(f)
+    f.close()
+    return data
+
+def writecache(cache_id, data):
+    f = open(path.join(CACHE_DIR, cache_id), "w+")
+    pickle.dump(data, f)
+    f.close()
+
+def checkcache(cache_id):
+    return ( path.exists(path.join(CACHE_DIR, cache_id)) )
+
+def getkillmails(char_id):
+    cache_id = getcacheprefix(char_id) + "_killmails"
+    if checkcache(cache_id):
+        return readcache(cache_id)
+    else:
+        data = getkillmails_nocache(char_id)
+        writecache(cache_id, data)
+        return data
+
+def getkillmails_nocache(char_id):
+    if current_user.is_authenticated:
+        esisecurity.update_token(current_user.get_sso_data())
+        token = current_user.access_token
+        #op = esiapp.op['get_characters_character_id_killmails_recent'](
+        #    character_id=char_id,
+        #    datasource='tranquility',
+        #    token=token,
+        #)
+        #data = esiclient.request(op)
+        #pprint(data.data)
+
+        kms = []
+        systems = []
+        ships = []
+        data = getpubkms(char_id)
+
+        for km in data:
+            killmail_id = km['killmail_id']
+            killmail_hash = km['zkb']['hash']
+            killmail = None
+            op = esiapp.op['get_killmails_killmail_id_killmail_hash'](
+                killmail_id=killmail_id,
+                killmail_hash=killmail_hash,
+            )
+            kmdata = esiclient.request(op)
+            #pprint(kmdata.data)
+            try:
+                victim = kmdata.data['victim']
+                is_victim = victim['character_id'] == char_id
+                kmd = None
+                if is_victim:
+                    kmd = kmdata.data['victim']
+                else:
+                    for attacker in kmdata.data['attackers']:
+                        #pprint(attacker)
+                        try:
+                            if attacker['character_id'] == char_id:
+                                kmd = attacker
+                        except KeyError:
+                            pass
+                
+                ship_id = kmd['ship_type_id']
+                ship_names = resolvenamesfromids([ship_id, kmdata.data['solar_system_id'], ])
+                ship_name = ship_names[0]['name']
+                solar_system = ship_names[1]['name']
+                #pprint(solar_system)
+                
+                ships.append(ship_name)
+                systems.append(solar_system)
+            except KeyError:
+                pass
+
+        return {'systems':systems, 'ships': ships}
+
+    else:
+        return []
+
+
+def resolvenamesfromids(ids):
+    op = esiapp.op['post_universe_names'](ids=ids,)
+    data = esiclient.request(op)
+    return data.data
+
+def getcharinfo(char_id):
+    data = None
+
+    op = esiapp.op['get_characters_character_id'](
+        character_id=char_id,
+        datasource='tranquility',
+    )
+    data = esiclient.request(op)
+    pprint(data.data)
+
+    return data.data
+
+@app.route('/searchintel')
+def searchintel():
+    data = None
+    if current_user.is_authenticated:
+        esisecurity.update_token(current_user.get_sso_data())
+    
+    return render_template('searchintel.html', **{
+        'data': data,
+    })
+
+@app.route('/lookupresults')
+def lookupresults():
+    data = None
+    char_id = None
+    char_info = None
+    killmails = []
+    systems = None
+    if current_user.is_authenticated:
+        esisecurity.update_token(current_user.get_sso_data())
+
+    searchstr = request.args.get('string')
+    if len(searchstr) > 0:
+        data = searchapi(searchstr)
+
+        if data.data is not None:
+            char_id = data.data['character'][0]
+            print("character id: %s" % (char_id,))
+            try:
+                char_info = getcharinfo(char_id)
+                try:
+                    killmails = getkillmails(char_id)
+                except TypeError:
+                    pass
+            except TypeError:
+                pass
+
+    names = resolvenamesfromids([char_info.corporation_id, char_info.alliance_id])
+    corp_name = names[1]['name']
+    alliance_name = names[0]['name']
+
+    return render_template('lookupresults.html', **{
+        'data': data,
+        'char_id': char_id,
+        'char_info': char_info,
+        'systems': list(set(killmails['systems'])),
+        'ships': list(set(killmails['ships'])),
+        'corp_name': corp_name,
+        'alliance_name': alliance_name,
+    })        
 
 
 if __name__ == '__main__':
